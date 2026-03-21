@@ -1,0 +1,11 @@
+# Python 3.12
+numpy==2.3.5
+pandas==3.0.0
+duckdb==1.4.1
+neurokit2==0.2.12
+wfdb==4.3.1
+scipy==1.16.2
+tqdm==4.67.3
+
+# CPU-only fallback
+torch==2.5.1

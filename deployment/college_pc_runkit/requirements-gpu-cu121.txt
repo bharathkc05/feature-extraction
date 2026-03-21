@@ -1,0 +1,13 @@
+# Python 3.12
+numpy==2.3.5
+pandas==3.0.0
+duckdb==1.4.1
+neurokit2==0.2.12
+wfdb==4.3.1
+scipy==1.16.2
+tqdm==4.67.3
+
+# CUDA build (required for --gpu-stats)
+torch==2.5.1+cu121
+torchvision==0.20.1+cu121
+torchaudio==2.5.1+cu121
