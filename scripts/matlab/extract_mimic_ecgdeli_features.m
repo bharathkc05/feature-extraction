@@ -1,4 +1,4 @@
-function extract_mimic_ecgdeli_features(index_csv, output_csv, num_workers)
+function extract_mimic_ecgdeli_features(index_csv, output_csv, num_workers, start_idx, end_idx, append_output)
 % ECGDeli Feature Extraction for MIMIC-IV
 % Extracts 93 validated ECGDeli features and writes CSV keyed by study_id.
 
@@ -38,6 +38,20 @@ fprintf('==========================================================\n\n');
 fprintf('Loading index: %s\n', index_csv);
 cohort = readtable(index_csv);
 
+if nargin < 4 || isempty(start_idx)
+    start_idx = 1;
+end
+if nargin < 5 || isempty(end_idx)
+    end_idx = 0;
+end
+if nargin < 6 || isempty(append_output)
+    append_output = false;
+end
+
+start_idx = max(1, floor(start_idx));
+end_idx = floor(end_idx);
+append_output = logical(append_output);
+
 required_cols = {'study_id'};
 for i = 1:numel(required_cols)
     if ~ismember(required_cols{i}, cohort.Properties.VariableNames)
@@ -49,8 +63,19 @@ if ~ismember('waveform_path', cohort.Properties.VariableNames)
     error('index CSV must contain waveform_path column exported by Python pipeline.');
 end
 
+total_records = height(cohort);
+if end_idx <= 0
+    end_idx = total_records;
+end
+end_idx = min(end_idx, total_records);
+
+if start_idx > total_records || start_idx > end_idx
+    error('Requested ECGDeli range is empty/invalid (start=%d, end=%d, total=%d).', start_idx, end_idx, total_records);
+end
+
+cohort = cohort(start_idx:end_idx, :);
 num_records = height(cohort);
-fprintf('  Loaded %d ECG records\n\n', num_records);
+fprintf('  Loaded %d ECG records (total=%d, range=%d..%d)\n\n', num_records, total_records, start_idx, end_idx);
 
 if nargin < 3 || isempty(num_workers)
     workers_env = str2double(getenv('MATLAB_ECGDELI_WORKERS'));
@@ -119,6 +144,7 @@ fprintf('Starting ECGDeli extraction...\n');
 fprintf('----------------------------------------------------------\n');
 fprintf('Workers requested: %d\n', num_workers);
 fprintf('Checkpoint every: %d records\n', checkpoint_every);
+fprintf('Append output mode: %d\n', append_output);
 
 tic;
 success_count = 0;
@@ -129,15 +155,30 @@ if num_workers > 1
     has_parallel_toolbox = ~isempty(ver('parallel')) && license('test', 'Distrib_Computing_Toolbox');
     if has_parallel_toolbox
         try
+            local_cluster = parcluster('local');
+            profile_max_workers = local_cluster.NumWorkers;
+            target_workers = num_workers;
+
+            if target_workers > profile_max_workers
+                try
+                    local_cluster.NumWorkers = target_workers;
+                    fprintf('Runtime local worker cap raised: %d -> %d\n', profile_max_workers, local_cluster.NumWorkers);
+                catch workerCapME
+                    fprintf('Could not raise runtime local worker cap (%s). Using max available %d workers.\n', workerCapME.message, profile_max_workers);
+                    target_workers = profile_max_workers;
+                end
+            end
+
+            target_workers = max(1, min(target_workers, local_cluster.NumWorkers));
             pool = gcp('nocreate');
             if isempty(pool)
-                parpool('local', num_workers);
-            elseif pool.NumWorkers ~= num_workers
+                parpool(local_cluster, target_workers);
+            elseif pool.NumWorkers ~= target_workers
                 delete(pool);
-                parpool('local', num_workers);
+                parpool(local_cluster, target_workers);
             end
             can_parallel = true;
-            fprintf('Parallel mode: enabled (%d workers)\n', num_workers);
+            fprintf('Parallel mode: enabled (%d workers requested, %d workers active)\n', num_workers, target_workers);
         catch ME
             fprintf('Parallel mode unavailable (%s). Falling back to sequential mode.\n', ME.message);
             can_parallel = false;
@@ -179,16 +220,17 @@ if can_parallel
         rate = block_end / max(elapsed, 1e-6);
         eta_seconds = (num_records - block_end) / max(rate, 1e-6);
         eta_hours = eta_seconds / 3600;
+        global_block_end = start_idx + block_end - 1;
         fprintf('[%d/%d] %.1f ECGs/min | Success: %d | Failed: %d | ETA: %.1fh\n', ...
-            block_end, num_records, rate*60, success_count, fail_count, eta_hours);
+            global_block_end, total_records, rate*60, success_count, fail_count, eta_hours);
 
-        if mod(block_end, checkpoint_every) == 0
+        if mod(global_block_end, checkpoint_every) == 0
             checkpoint_results = table();
             checkpoint_results.study_id = results.study_id(1:block_end);
             for fi = 1:feature_count
                 checkpoint_results.(feature_names{fi}) = feature_matrix(1:block_end, fi);
             end
-            checkpoint_file = fullfile(output_folder, sprintf('checkpoint_ecgdeli_%d.csv', block_end));
+            checkpoint_file = fullfile(output_folder, sprintf('checkpoint_ecgdeli_%d.csv', global_block_end));
             writetable(checkpoint_results, checkpoint_file);
             fprintf('  ✓ Checkpoint saved: %s\n', checkpoint_file);
         end
@@ -200,8 +242,9 @@ else
             rate = idx / max(elapsed, 1e-6);
             eta_seconds = (num_records - idx) / max(rate, 1e-6);
             eta_hours = eta_seconds / 3600;
+            global_idx = start_idx + idx - 1;
             fprintf('[%d/%d] %.1f ECGs/min | Success: %d | Failed: %d | ETA: %.1fh\n', ...
-                idx, num_records, rate*60, success_count, fail_count, eta_hours);
+                global_idx, total_records, rate*60, success_count, fail_count, eta_hours);
         end
 
         study_id = cohort.study_id(idx);
@@ -221,13 +264,14 @@ else
             fail_count = fail_count + 1;
         end
 
-        if mod(idx, checkpoint_every) == 0
+        global_idx = start_idx + idx - 1;
+        if mod(global_idx, checkpoint_every) == 0
             checkpoint_results = table();
             checkpoint_results.study_id = results.study_id(1:idx);
             for fi = 1:feature_count
                 checkpoint_results.(feature_names{fi}) = feature_matrix(1:idx, fi);
             end
-            checkpoint_file = fullfile(output_folder, sprintf('checkpoint_ecgdeli_%d.csv', idx));
+            checkpoint_file = fullfile(output_folder, sprintf('checkpoint_ecgdeli_%d.csv', global_idx));
             writetable(checkpoint_results, checkpoint_file);
             fprintf('  ✓ Checkpoint saved: %s\n', checkpoint_file);
         end
@@ -248,13 +292,22 @@ end
 
 fprintf('\n----------------------------------------------------------\n');
 fprintf('Saving final results...\n');
-writetable(results, output_csv);
+if append_output && isfile(output_csv)
+    existing_results = readtable(output_csv);
+    merged_results = [existing_results; results];
+    [~, keep_idx] = unique(merged_results.study_id, 'last');
+    merged_results = merged_results(sort(keep_idx), :);
+    writetable(merged_results, output_csv);
+    fprintf('Appended range into existing output (%d total rows after merge)\n', height(merged_results));
+else
+    writetable(results, output_csv);
+end
 
 elapsed_total = toc;
 fprintf('\n==========================================================\n');
 fprintf('EXTRACTION COMPLETE\n');
 fprintf('==========================================================\n');
-fprintf('Total ECGs: %d\n', height(cohort));
+fprintf('Total ECGs (this run): %d\n', height(cohort));
 fprintf('Successful: %d (%.1f%%)\n', success_count, 100*success_count/max(height(cohort), 1));
 fprintf('Failed: %d (%.1f%%)\n', fail_count, 100*fail_count/max(height(cohort), 1));
 fprintf('Total time: %.1f hours\n', elapsed_total/3600);
