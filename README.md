@@ -31,6 +31,7 @@ See `data/README_DATA_PLACEMENT.md` for placement details.
 4. Validate setup and data placement:
    - `.\cuda_env\Scripts\python.exe deployment/college_pc_runkit/verify_setup.py`
    - `.\cuda_env\Scripts\python.exe deployment/college_pc_runkit/validate_data_placement.py`
+   - `.\cuda_env\Scripts\python.exe deployment/college_pc_runkit/check_wfdb_integrity.py --path data/raw/MIMIC-IV-ECG-1.0`
 5. Run 100-sample extraction:
    - `powershell -ExecutionPolicy Bypass -File deployment/college_pc_runkit/run_hybrid_100.ps1`
    - CPU-safe run (if CUDA is unavailable):

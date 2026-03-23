@@ -69,6 +69,13 @@ powershell -ExecutionPolicy Bypass -File deployment/college_pc_runkit/tune_matla
 ```powershell
 .\cuda_env\Scripts\python.exe deployment/college_pc_runkit/verify_setup.py
 .\cuda_env\Scripts\python.exe deployment/college_pc_runkit/validate_data_placement.py
+.\cuda_env\Scripts\python.exe deployment/college_pc_runkit/check_wfdb_integrity.py
+```
+
+If your waveform dataset is stored in a non-default location, pass it explicitly:
+
+```powershell
+.\cuda_env\Scripts\python.exe deployment/college_pc_runkit/check_wfdb_integrity.py --path data/raw/MIMIC-IV-ECG-1.0
 ```
 
 ## 5) Run 100-sample extraction
