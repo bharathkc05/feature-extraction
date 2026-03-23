@@ -8,6 +8,7 @@ All commands in this README use relative paths, so the extracted folder can be i
 ## What is included
 - `scripts/phase_d_hybrid_192_feature_extraction.py`
 - `scripts/matlab/extract_mimic_ecgdeli_features.m`
+- `third_party/wfdb/` (portable local WFDB MATLAB toolkit snapshot)
 - `deployment/college_pc_runkit/*` (setup, validation, run scripts, requirements)
 - Empty `data/` structure placeholders
 
@@ -26,6 +27,7 @@ See `data/README_DATA_PLACEMENT.md` for placement details.
      - `powershell -ExecutionPolicy Bypass -File deployment/college_pc_runkit/setup_college_env.ps1`
 3. Setup MATLAB toolboxes (if not already configured):
    - `powershell -ExecutionPolicy Bypass -File deployment/college_pc_runkit/setup_matlab_toolboxes.ps1 -CloneRepos`
+   - This now uses bundled `third_party/wfdb` first and only downloads WFDB if local files are missing.
 4. Validate setup and data placement:
    - `.\cuda_env\Scripts\python.exe deployment/college_pc_runkit/verify_setup.py`
    - `.\cuda_env\Scripts\python.exe deployment/college_pc_runkit/validate_data_placement.py`

@@ -22,6 +22,10 @@ Inside MATLAB path, make sure these are available:
 - ECGDeli toolbox (`Annotate_ECG_Multi`, `ExtractAmplitudeFeaturesFromFPT`, etc.)
 - WFDB MATLAB functions (`rdsamp`)
 
+Bundle behavior:
+- `third_party/wfdb` is bundled in this package for portability.
+- `setup_matlab_toolboxes.ps1` uses bundled WFDB first and downloads from PhysioNet only if local WFDB files are missing.
+
 The Python pipeline passes environment variables to MATLAB when needed:
 - `ECGDELI_PATH`
 - `WFDB_PATH`

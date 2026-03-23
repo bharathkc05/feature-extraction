@@ -54,6 +54,7 @@ _TORCH_IMPORT_ATTEMPTED = False
 MIN_GPU_STATS_SIZE = 1000
 ROLLING_CHECKPOINT = "hybrid_192_rolling.parquet"
 DELTA_CHECKPOINT_PATTERN = re.compile(r"^hybrid_192_delta_(\d+)_(\d+)\.parquet$")
+MATLAB_CHECKPOINT_PATTERN = re.compile(r"^checkpoint_ecgdeli_(\d+)\.csv$")
 
 
 def _get_torch_module():
@@ -989,6 +990,43 @@ def _load_latest_checkpoint_rows(checkpoint_dir: Path) -> List[Dict[str, object]
     return rows
 
 
+def _count_csv_data_rows(csv_path: Path) -> int:
+    if not csv_path.exists():
+        return 0
+    with open(csv_path, "r", encoding="utf-8", errors="replace", newline="") as handle:
+        total_lines = sum(1 for _ in handle)
+    return max(0, total_lines - 1)
+
+
+def _infer_matlab_completed_rows(output_csv: Path) -> int:
+    completed_from_checkpoints = 0
+    output_dir = output_csv.parent
+    if output_dir.exists():
+        for candidate in output_dir.glob("checkpoint_ecgdeli_*.csv"):
+            match = MATLAB_CHECKPOINT_PATTERN.match(candidate.name)
+            if not match:
+                continue
+            checkpoint_rows = int(match.group(1))
+            observed_rows = _count_csv_data_rows(candidate)
+            if observed_rows >= checkpoint_rows:
+                completed_from_checkpoints = max(completed_from_checkpoints, checkpoint_rows)
+            else:
+                print(
+                    "Ignoring malformed MATLAB checkpoint (non-cumulative rows): "
+                    f"{candidate.name} (rows={observed_rows:,}, checkpoint_rows={checkpoint_rows:,})"
+                )
+
+    completed_from_output = _count_csv_data_rows(output_csv)
+
+    inferred = max(completed_from_checkpoints, completed_from_output)
+    if inferred > 0:
+        print(
+            "Detected prior MATLAB ECGDeli progress: "
+            f"rows={inferred:,} (checkpoint_rows={completed_from_checkpoints:,}, output_rows={completed_from_output:,})"
+        )
+    return inferred
+
+
 def _escape_for_matlab_string(path: Path) -> str:
     return path.resolve().as_posix().replace("'", "''")
 
@@ -1252,6 +1290,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint-dir", type=Path, default=None)
     parser.add_argument("--resume-from-latest-checkpoint", action="store_true", help="Resume extraction from latest checkpoint in --checkpoint-dir (or default checkpoint folder)")
     parser.add_argument("--max-records-per-run", type=int, default=0, help="Maximum number of records to process in this run after resume offset (0 = no cap)")
+    parser.add_argument(
+        "--resume-increment",
+        type=int,
+        default=0,
+        help=(
+            "When resuming, process only the next N records from the latest checkpoint "
+            "(0 = disabled). Useful for stepping from 4000 -> 4005, etc."
+        ),
+    )
     parser.add_argument("--tqdm-miniters", type=int, default=10, help="Progress bar update frequency in records (default: 10)")
     parser.add_argument("--suppress-neurokit-warnings", dest="suppress_neurokit_warnings", action="store_true", help="Suppress frequent NeuroKit runtime warnings for cleaner logs")
     parser.add_argument("--show-neurokit-warnings", dest="suppress_neurokit_warnings", action="store_false", help="Show NeuroKit runtime warnings")
@@ -1271,8 +1318,46 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _normalize_path_args_to_repo_root(args: argparse.Namespace) -> argparse.Namespace:
+    repo_root = Path(__file__).resolve().parents[1]
+    path_fields = [
+        "db_path",
+        "mimic_ecg_dir",
+        "cohort_path",
+        "canonical_index_path",
+        "ecgdeli_csv",
+        "ecgdeli_parquet",
+        "ecgdeli_db",
+        "matlab_script",
+        "matlab_index_csv",
+        "matlab_output_csv",
+        "matlab_ecgdeli_path",
+        "matlab_wfdb_path",
+        "matlab_mimic_ecg_root",
+        "checkpoint_dir",
+        "output_parquet",
+        "output_csv",
+        "study_id_duplicate_audit_csv",
+    ]
+
+    for field in path_fields:
+        value = getattr(args, field, None)
+        if value is None:
+            continue
+        if not isinstance(value, Path):
+            value = Path(value)
+        if not value.is_absolute():
+            value = (repo_root / value).resolve()
+        else:
+            value = value.resolve()
+        setattr(args, field, value)
+
+    return args
+
+
 def main() -> None:
     args = parse_args()
+    args = _normalize_path_args_to_repo_root(args)
     resolved_matlab_workers = _resolve_matlab_workers(args.matlab_workers)
 
     if args.suppress_neurokit_warnings:
@@ -1412,9 +1497,16 @@ def main() -> None:
         )
 
     planned_run_count = len(records)
-    matlab_start_row = initial_completed_rows + 1 if planned_run_count > 0 else 0
-    matlab_end_row = initial_completed_rows + planned_run_count if planned_run_count > 0 else 0
-    matlab_append_output = bool(args.resume_from_latest_checkpoint and initial_completed_rows > 0)
+    matlab_target_start = initial_completed_rows + 1 if planned_run_count > 0 else 0
+    matlab_target_end = initial_completed_rows + planned_run_count if planned_run_count > 0 else 0
+    matlab_completed_rows = initial_completed_rows
+    if args.resume_from_latest_checkpoint and planned_run_count > 0:
+        detected_matlab_rows = _infer_matlab_completed_rows(args.matlab_output_csv)
+        matlab_completed_rows = max(matlab_completed_rows, detected_matlab_rows)
+
+    matlab_start_row = max(matlab_target_start, matlab_completed_rows + 1) if planned_run_count > 0 else 0
+    matlab_end_row = matlab_target_end
+    matlab_append_output = bool(args.resume_from_latest_checkpoint and matlab_completed_rows > 0)
 
     if args.run_matlab_ecgdeli:
         args.matlab_index_csv.parent.mkdir(parents=True, exist_ok=True)
@@ -1425,6 +1517,12 @@ def main() -> None:
 
         if planned_run_count <= 0:
             print("Skipping MATLAB ECGDeli: no records planned for this resumed run.")
+        elif matlab_start_row > matlab_end_row:
+            print(
+                "Skipping MATLAB ECGDeli: planned row range already completed "
+                f"(target={matlab_target_start:,}..{matlab_target_end:,}, "
+                f"detected_completed={matlab_completed_rows:,})."
+            )
         else:
             run_matlab_ecgdeli(
                 matlab_executable=args.matlab_executable,

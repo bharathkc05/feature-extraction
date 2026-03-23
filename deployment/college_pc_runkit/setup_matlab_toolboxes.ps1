@@ -49,10 +49,16 @@ if ($CloneRepos) {
   }
 }
 
-# Official WFDB MATLAB toolbox installation (PhysioNet ZIP method)
-$wfdbInstallRoot = To-MatlabPath $WfdbPath
-$wfdbZipEscaped = $WfdbZipUrl.Replace("'", "''")
-$wfdbInstallCmd = @"
+# WFDB MATLAB toolbox setup
+# Prefer bundled local WFDB toolkit for portability; only download if local copy is missing.
+$wfdbMcodePath = Join-Path $WfdbPath "mcode"
+$localWfdbReady = (Test-Path (Join-Path $wfdbMcodePath "rdsamp.m"))
+
+if (-not $localWfdbReady) {
+  Write-Host "Local WFDB toolkit not found at $wfdbMcodePath; downloading official PhysioNet ZIP..."
+  $wfdbInstallRoot = To-MatlabPath $WfdbPath
+  $wfdbZipEscaped = $WfdbZipUrl.Replace("'", "''")
+  $wfdbInstallCmd = @"
 cd('$wfdbInstallRoot');
 old_path = which('rdsamp');
 if (~isempty(old_path))
@@ -68,7 +74,10 @@ fprintf('WFDB toolbox installed via official PhysioNet ZIP flow.\\n');
 fprintf('WFDB rdsamp path: %s\\n', which('rdsamp'));
 "@
 
-& $MatlabExe -batch $wfdbInstallCmd
+  & $MatlabExe -batch $wfdbInstallCmd
+} else {
+  Write-Host "Using bundled local WFDB toolkit at $wfdbMcodePath"
+}
 
 if (!(Test-Path $EcgdeliPath)) {
   throw "ECGDeli path not found: $EcgdeliPath`nEither clone with -CloneRepos -EcgdeliRepoUrl <url> or place ECGDeli manually."

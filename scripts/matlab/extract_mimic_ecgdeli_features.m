@@ -20,6 +20,20 @@ if ~isempty(mimic_root) && isfolder(mimic_root)
     fprintf('Using MIMIC root as MATLAB cwd: %s\n', mimic_root);
 end
 
+mimic_root_resolved = string(mimic_root);
+if strlength(mimic_root_resolved) == 0 || ~isfolder(char(mimic_root_resolved))
+    mimic_root_resolved = string(pwd);
+end
+
+if exist('setwfdb', 'file') == 2 && strlength(mimic_root_resolved) > 0 && isfolder(char(mimic_root_resolved))
+    try
+        setwfdb(char(mimic_root_resolved));
+        fprintf('Configured WFDB search root: %s\n', mimic_root_resolved);
+    catch wfdbSetME
+        fprintf('Warning: failed to configure WFDB root (%s)\n', wfdbSetME.message);
+    end
+end
+
 required_functions = {
     'rdsamp', 'Annotate_ECG_Multi', 'ExtractAmplitudeFeaturesFromFPT', ...
     'ExtractIntervalFeaturesFromFPT', 'ECG_High_Low_Filter', ...
@@ -146,6 +160,60 @@ fprintf('Workers requested: %d\n', num_workers);
 fprintf('Checkpoint every: %d records\n', checkpoint_every);
 fprintf('Append output mode: %d\n', append_output);
 
+baseline_results = table();
+if append_output
+    output_rows = 0;
+    output_results = table();
+    if isfile(output_csv)
+        output_results = readtable(output_csv);
+        output_rows = height(output_results);
+    end
+
+    checkpoint_pattern = fullfile(output_folder, 'checkpoint_ecgdeli_*.csv');
+    checkpoint_listing = dir(checkpoint_pattern);
+    best_checkpoint_rows = 0;
+    best_checkpoint_file = "";
+    best_checkpoint_results = table();
+
+    for ci = 1:numel(checkpoint_listing)
+        token = regexp(checkpoint_listing(ci).name, '^checkpoint_ecgdeli_(\d+)\.csv$', 'tokens', 'once');
+        if isempty(token)
+            continue;
+        end
+        checkpoint_rows = str2double(token{1});
+        if isnan(checkpoint_rows) || checkpoint_rows >= start_idx || checkpoint_rows <= best_checkpoint_rows
+            continue;
+        end
+
+        candidate_file = string(fullfile(checkpoint_listing(ci).folder, checkpoint_listing(ci).name));
+        if ~isfile(char(candidate_file))
+            continue;
+        end
+
+        candidate_results = readtable(char(candidate_file));
+        candidate_row_count = height(candidate_results);
+        if candidate_row_count < checkpoint_rows
+            fprintf('Ignoring malformed checkpoint for baseline: %s (rows=%d, expected>=%d)\n', candidate_file, candidate_row_count, checkpoint_rows);
+            continue;
+        end
+
+        best_checkpoint_rows = checkpoint_rows;
+        best_checkpoint_file = candidate_file;
+        best_checkpoint_results = candidate_results;
+    end
+
+    if best_checkpoint_rows > output_rows
+        baseline_results = best_checkpoint_results;
+        fprintf('Loaded baseline checkpoint for resume checkpoints: %s (%d rows)\n', best_checkpoint_file, height(baseline_results));
+    elseif output_rows > 0
+        baseline_results = output_results;
+        fprintf('Loaded baseline output for resume checkpoints: %d rows\n', height(baseline_results));
+    elseif best_checkpoint_rows > 0
+        baseline_results = best_checkpoint_results;
+        fprintf('Loaded baseline checkpoint for resume checkpoints: %s (%d rows)\n', best_checkpoint_file, height(baseline_results));
+    end
+end
+
 tic;
 success_count = 0;
 fail_count = 0;
@@ -203,7 +271,7 @@ if can_parallel
             idx = block_indices(bi);
             study_id = cohort.study_id(idx);
             record_path_raw = cohort.waveform_path(idx);
-            [row_values, ok, err_msg] = extract_single_ecgdeli_row(record_path_raw, study_id, feature_names);
+            [row_values, ok, err_msg] = extract_single_ecgdeli_row(record_path_raw, study_id, feature_names, mimic_root_resolved);
             block_features(bi, :) = row_values;
             block_success(bi) = ok;
             block_errors(bi) = string(err_msg);
@@ -224,11 +292,26 @@ if can_parallel
         fprintf('[%d/%d] %.1f ECGs/min | Success: %d | Failed: %d | ETA: %.1fh\n', ...
             global_block_end, total_records, rate*60, success_count, fail_count, eta_hours);
 
-        if mod(global_block_end, checkpoint_every) == 0
+        block_failed_mask = ~block_success;
+        if any(block_failed_mask)
+            failed_errors = block_errors(block_failed_mask);
+            non_empty_errors = failed_errors(strlength(failed_errors) > 0);
+            max_error_samples = min(3, numel(non_empty_errors));
+            for ei = 1:max_error_samples
+                fprintf('  Sample error: %s\n', non_empty_errors(ei));
+            end
+        end
+
+        if success_count > 0 && mod(global_block_end, checkpoint_every) == 0
             checkpoint_results = table();
             checkpoint_results.study_id = results.study_id(1:block_end);
             for fi = 1:feature_count
                 checkpoint_results.(feature_names{fi}) = feature_matrix(1:block_end, fi);
+            end
+            if append_output && ~isempty(baseline_results)
+                merged_checkpoint = [baseline_results; checkpoint_results];
+                [~, keep_idx] = unique(merged_checkpoint.study_id, 'last');
+                checkpoint_results = merged_checkpoint(sort(keep_idx), :);
             end
             checkpoint_file = fullfile(output_folder, sprintf('checkpoint_ecgdeli_%d.csv', global_block_end));
             writetable(checkpoint_results, checkpoint_file);
@@ -249,7 +332,7 @@ else
 
         study_id = cohort.study_id(idx);
         record_path_raw = cohort.waveform_path(idx);
-        [row_values, ok, err_msg] = extract_single_ecgdeli_row(record_path_raw, study_id, feature_names);
+        [row_values, ok, err_msg] = extract_single_ecgdeli_row(record_path_raw, study_id, feature_names, mimic_root_resolved);
 
         feature_matrix(idx, :) = row_values;
         success_flags(idx) = ok;
@@ -265,11 +348,16 @@ else
         end
 
         global_idx = start_idx + idx - 1;
-        if mod(global_idx, checkpoint_every) == 0
+        if success_count > 0 && mod(global_idx, checkpoint_every) == 0
             checkpoint_results = table();
             checkpoint_results.study_id = results.study_id(1:idx);
             for fi = 1:feature_count
                 checkpoint_results.(feature_names{fi}) = feature_matrix(1:idx, fi);
+            end
+            if append_output && ~isempty(baseline_results)
+                merged_checkpoint = [baseline_results; checkpoint_results];
+                [~, keep_idx] = unique(merged_checkpoint.study_id, 'last');
+                checkpoint_results = merged_checkpoint(sort(keep_idx), :);
             end
             checkpoint_file = fullfile(output_folder, sprintf('checkpoint_ecgdeli_%d.csv', global_idx));
             writetable(checkpoint_results, checkpoint_file);
@@ -292,6 +380,9 @@ end
 
 fprintf('\n----------------------------------------------------------\n');
 fprintf('Saving final results...\n');
+if success_count == 0
+    error('MATLAB ECGDeli extraction produced 0 successful records. Aborting without writing output to avoid false resume progress.');
+end
 if append_output && isfile(output_csv)
     existing_results = readtable(output_csv);
     merged_results = [existing_results; results];
@@ -317,12 +408,20 @@ fprintf('==========================================================\n');
 end
 
 
-function [row_values, is_success, error_message] = extract_single_ecgdeli_row(record_path_raw, study_id, feature_names)
+function [row_values, is_success, error_message] = extract_single_ecgdeli_row(record_path_raw, study_id, feature_names, mimic_root)
 row_values = nan(1, length(feature_names));
 is_success = false;
 error_message = "";
 
+if nargin < 4 || strlength(string(mimic_root)) == 0
+    mimic_root = string(getenv('MIMIC_ECG_ROOT'));
+end
+
 try
+    if strlength(mimic_root) > 0 && isfolder(char(mimic_root))
+        cd(char(mimic_root));
+    end
+
     record_path = string(record_path_raw);
     if strlength(record_path) == 0
         error('Empty waveform_path');
@@ -330,15 +429,18 @@ try
 
     record_path = erase(record_path, ".hea");
     record_path = erase(record_path, ".dat");
+    record_path = replace(record_path, "\\", "/");
 
-    if startsWith(record_path, "files\\")
-        record_path = replace(record_path, "files\\", "files/");
-        record_path = replace(record_path, "\\", "/");
-    elseif ~contains(record_path, ":") && ~startsWith(record_path, "files/")
+    if ~contains(record_path, ":") && ~startsWith(record_path, "files/")
         record_path = "files/" + erase(record_path, "./");
     end
 
-    [signal, Fs, ~] = rdsamp(char(record_path));
+    [resolved_record_path, path_ok, path_msg] = resolve_local_record_path(record_path, mimic_root);
+    if ~path_ok
+        error(path_msg);
+    end
+
+    [signal, Fs, ~] = rdsamp(char(resolved_record_path));
 
     if size(signal, 2) ~= 12
         error('Expected 12 leads, got %d', size(signal, 2));
@@ -369,6 +471,73 @@ catch ME
     if ~isempty(study_id)
         error_message = "study " + string(study_id) + ": " + error_message;
     end
+end
+
+
+function [resolved_path, ok, message] = resolve_local_record_path(record_path, mimic_root)
+resolved_path = string(record_path);
+ok = false;
+message = "";
+
+if strlength(resolved_path) == 0
+    message = "Empty waveform_path after normalization";
+    return;
+end
+
+resolved_path = strip(resolved_path);
+resolved_path = replace(resolved_path, "\\", "/");
+resolved_path = regexprep(resolved_path, '/+$', '');
+
+if strlength(resolved_path) == 0
+    message = "Empty waveform_path after trimming";
+    return;
+end
+
+if ~contains(resolved_path, ":") && ~startsWith(resolved_path, "files/")
+    resolved_path = "files/" + erase(resolved_path, "./");
+end
+
+candidate_paths = strings(0, 1);
+candidate_paths(end + 1) = resolved_path;
+if strlength(mimic_root) > 0 && isfolder(char(mimic_root))
+    candidate_paths(end + 1) = string(fullfile(char(mimic_root), strrep(char(resolved_path), '/', filesep)));
+end
+
+[folder_path, record_name, ~] = fileparts(char(resolved_path));
+if isempty(record_name)
+    [~, record_name] = fileparts(folder_path);
+end
+
+if mod(strlength(record_name), 2) == 0
+    half_len = strlength(record_name) / 2;
+    left_half = extractBefore(record_name, half_len + 1);
+    right_half = extractAfter(record_name, half_len);
+    if left_half == right_half
+        collapsed_name = left_half;
+        collapsed_rel = string(fullfile(folder_path, char(collapsed_name)));
+        collapsed_rel = replace(collapsed_rel, "\\", "/");
+        if strlength(mimic_root) > 0 && isfolder(char(mimic_root))
+            candidate_paths(end + 1) = string(fullfile(char(mimic_root), strrep(char(collapsed_rel), '/', filesep)));
+        end
+        candidate_paths(end + 1) = collapsed_rel;
+    end
+end
+
+candidate_paths = unique(candidate_paths, 'stable');
+
+for i = 1:numel(candidate_paths)
+    c = candidate_paths(i);
+    c = regexprep(c, '/+$', '');
+    hea_path = c + ".hea";
+    dat_path = c + ".dat";
+    if isfile(char(hea_path)) || isfile(char(dat_path))
+        resolved_path = c;
+        ok = true;
+        return;
+    end
+end
+
+message = sprintf('Local ECG record not found for "%s" (checked %d candidates).', char(record_path), numel(candidate_paths));
 end
 end
 
