@@ -1,0 +1,21 @@
+"C:\Users\Acer\Desktop\Capstone\Capstone\cuda_env\Scripts\python.exe" 
+  "C:\Users\Acer\Desktop\Capstone\Capstone\scripts\phase_d_hybrid_192_feature_extraction.py" 
+  --db-path "C:\Users\Acer\Desktop\Capstone\Capstone\data\mimic_database.duckdb" 
+  --mimic-ecg-dir "C:\Users\Acer\Desktop\Capstone\Capstone\data\raw\MIMIC-IV-ECG-1.0" 
+  --cohort-path "C:\Users\Acer\Desktop\Capstone\Capstone\data\processed\cohort_master.parquet" 
+  --canonical-index-path "C:\Users\Acer\Desktop\Capstone\Capstone\data\processed\canonical_index.parquet" 
+  --matlab-script "C:\Users\Acer\Desktop\Capstone\Capstone\scripts\matlab\extract_mimic_ecgdeli_features.m" 
+  --matlab-index-csv "C:\Users\Acer\Desktop\Capstone\Capstone\data\interim\mimic_index_for_ecgdeli.csv" 
+  --matlab-output-csv "C:\Users\Acer\Desktop\Capstone\Capstone\data\processed\mimic_ecgdeli_features.csv" 
+  --matlab-workers 8 
+  --matlab-mimic-ecg-root "C:\Users\Acer\Desktop\Capstone\Capstone\data\raw\MIMIC-IV-ECG-1.0" 
+  --run-matlab-ecgdeli 
+  --max-records-per-run 10000 
+  --resume-from-latest-checkpoint 
+  --checkpoint-every 1000 
+  --matlab-checkpoint-every 1000 
+  --checkpoint-dir "C:\Users\Acer\Desktop\Capstone\Capstone\data\processed\checkpoints_hybrid_192" 
+  --parallel-processes 18 
+  --output-parquet "C:\Users\Acer\Desktop\Capstone\Capstone\data\processed\mimic_hybrid_192_features.parquet" 
+  --output-csv "C:\Users\Acer\Desktop\Capstone\Capstone\data\processed\mimic_hybrid_192_features.csv" 
+  --study-id-duplicate-audit-csv "C:\Users\Acer\Desktop\Capstone\Capstone\data\processed\cohort_study_id_duplicate_audit.csv"
